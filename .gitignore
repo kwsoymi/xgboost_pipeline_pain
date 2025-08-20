@@ -1,0 +1,17 @@
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# Ignore output artifacts
+output/
+
+# Ignore data files
+data/*.csv
+data/*.tsv
+data/*.txt
+data/*.rds
+data/*.dta
+data/*.sav
+!data/df_transformed_template.csv
+tuning_log.txt

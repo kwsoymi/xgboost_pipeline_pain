@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+title: "Pain Model XGBoost Pipeline"
+authors:
+  - family-names: Oyewale
+    given-names: Michael
+    orcid: "https://orcid.org/0000-0002-0167-9604"
+
+  - family-names: van der Gun
+    given-names: Govert J
+    orcid: "https://orcid.org/0009-0003-8618-8955"
+
+  - family-names: Marks
+    given-names: Miriam
+    orcid: "https://orcid.org/0000-0002-0623-2465"
+
+  - family-names: Herren
+    given-names: Daniel B
+    orcid: "https://orcid.org/0000-0001-6585-2341"
+
+  - family-names: Slijper
+    given-names: Harm
+    orcid: "https://orcid.org/0000-0002-8606-1474"
+
+  - family-names: Andrinopoulou
+    given-names: Eleni-Rosalina
+    orcid: "https://orcid.org/0000-0002-5372-4163"
+
+  - family-names: Selles
+    given-names: Ruud W
+    orcid: "https://orcid.org/0000-0002-2432-6756"
+
+license: MIT

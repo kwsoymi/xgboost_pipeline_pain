@@ -1,0 +1,713 @@
+---
+title: "Development and Internal Validation of a Transparent, Uncertainty-Aware XGBoost Machine Learning Pipeline: A Case Study in Pain Prediction After Thumb Arthroplasty"
+date: last-modified
+author: 
+  - name: Michael Oyewale
+    orcid: 0000-0002-0167-9604
+  - name: Govert van der Gun
+    orcid: 0009-0003-8618-8955
+lightbox: true
+format: 
+  html:
+    html-math-method: mathjax
+    code-tools: true
+    embed-resources: true
+editor: visual
+toc: true
+self-contained: true
+embed-resources: true
+---
+
+# Clinical prediction model
+
+## Load Helper Scripts and Required Libraries
+
+```{r packages}
+#| code-fold: true
+#| output: false
+#| warning: false
+
+source("helpers/utils.R")  # Utility functions used globally
+
+# List of required packages
+packages <- c(
+  "tidyverse", "ggplot2", "gghighlight", "ggtext", "GGally", "viridis", "shapviz", "haven", "skimr", 
+  "naniar", "pmsampsize", "groupdata2", "caret", "xgboost", "shiny", 
+  "doParallel", "foreach",  "ggdist", "doRNG", "dplyr", "haven", "lubridate", "stringr", "DiagrammeR",
+  "xgboost", "foreach", "doParallel", "ggplot2", "magrittr", "extrafont", 
+  "readxl", "Matrix", "shapviz", "gt", "labelled", "gtsummary", "rsconnect", "data.table", "EIX", "iml", 
+  "SHAPforxgboost", "ParBayesianOptimization", "ggdist", "scales", "png", "patchwork"
+)
+
+# Install and Load packages
+load_libraries(packages)
+```
+
+```{r helper-scripts}
+# Helper scripts for visualization and utility functions
+source("helpers/plot_helpers.R")  # Used for plots throughout the script
+source("helpers/cross_validation.R")  # Used in "Train the Initial Model" section
+source("helpers/helper_functions.R")  # Load or run models
+source("helpers/table_helpers.R")  # Create summary tables
+
+
+# Data pipeline scripts for data loading and preprocessing
+source("pipeline/load_data.R")  # Used in the "Load Data" section
+source("pipeline/data_preprocessing.R")  # Used in "Initial Data Cleaning" and "Transformations"
+source("pipeline/inclusion_exclusion.R")  # Used in "Inclusion and Exclusion Criteria" section
+
+
+# Modeling scripts for hyperparameter tuning and evaluation
+source("models/evaluate_xgb_model.R")
+source("models/comprehensive_evaluation.R")
+source("models/xgb_tuning.R")  # Used for model tuning
+source("models/XGB_bootstrap_PI_importance.R")  # Used for generating prediction intervals and aggregated feature importance metrics
+```
+
+## Load and Prepare Data
+
+Note: Most of the data cleaning and the creation of summary scores (e.g. EQ5D5L) was already done as part of the regular registry data preparation pipeline - the loaded .dta file is the result of that pipeline.
+
+### Data Load and Cleaning
+
+```{r data-preprocessing}
+#| code-fold: true
+#| output: false
+
+# File path to the dataset
+file_path <- "data/dsg-02-BaseFU.dta"
+
+# Data Load and Cleaning
+df_clean <- load_and_clean_data(file_path) %>%
+  convert_column_types() %>%
+  copy_event_info(columns_event_0 = c("sgopoth", "sgopothtxt", "mhdiagnose", "imxrdtprae"),
+                  columns_event_1 = c("dropoutyn___1", "dropoutdt", "identifikation_complete", 
+                                      "dropteil", "dropteillast6wo", "beruf", "erwartausmass", 
+                                      "erwartreason", "domhand"))
+```
+
+## Inclusion and Exclusion Criteria
+
+```{r inclusion-exclusion}
+#| label: clean-data
+#| code-fold: true
+#| output: false
+
+# Step 1: Filter up to (but not including) dual-missing outcome exclusion
+df_missingness_base <- df_clean %>%
+  exclude_dropouts() %T>%
+  {print(paste("After excluding dropouts:", count_unique_fid(.)))} %>%
+  filter_touch_prosthesis() %T>%
+  {print(paste("After filtering for Touch prosthesis:", count_unique_fid(.)))} %>%
+  filter_primary_oa() %T>%
+  {print(paste("After filtering for primary osteoarthritis:", count_unique_fid(.)))} %>%
+  filter_full_consent() %T>%
+  {print(paste("After filtering for full consent:", count_unique_fid(.)))} %>%
+  filter_surgery_date_valid() %T>%
+  {print(paste("After filtering for surgery date:", count_unique_fid(.)))}
+
+# For missingness tables
+df_transformed_missing <- df_missingness_base %>%
+  apply_data_transformations() %>%
+  create_new_variables() %>%
+  recode_surgeon_expertise() %>%
+  final_transformations()
+
+# Step 2: Now exclude dual-missing patients for modeling
+df_filtered <- df_missingness_base %>%
+  exclude_dual_missing_outcomes() %T>%
+  {print(paste("After excluding patients missing both outcomes:", count_unique_fid(.)))}
+
+```
+
+## Data Transformations and Feature Engineering
+
+```{r transformations}
+# Data Transformations and Feature Engineering
+df_transformed <- df_filtered %>%
+  apply_data_transformations() %>%
+  create_new_variables() %>%
+  recode_surgeon_expertise() %>%
+  final_transformations()
+```
+
+## Exploratory Data Analysis
+
+### Data Overview
+
+```{r exploratory-data-overview}
+#| code-fold: true 
+#| output: true
+
+# Summarize dataset structure and variable distribution
+skim(df_transformed) 
+```
+
+### Missing Value Analysis
+
+```{r missing-values}
+#| code-fold: true
+#| output: true
+
+# Visualize the proportion of missing values per variable
+gg_miss_var(df_transformed, show_pct = TRUE)
+```
+
+## Sample Size Considerations
+
+### Background
+
+Riley et al. 2018 - Minimum sample size for developing a multivariable prediction model
+
+### Minimum Sample Size Prediction Models
+
+```{r samplesize-pain}
+#| code-fold: true
+#| echo: false
+
+# Calculate minimum sample size for the pain prediction model
+pmsampsize(
+  type = "c",             # Continuous outcome
+  rsquared = 0.4,         # Expected R-squared for the model
+  parameters = 23,        # Number of candidate predictor parameters
+  shrinkage = 0.9,        # Desired shrinkage level (10% shrinkage)
+  seed = 199987,          # Random seed for reproducibility
+  intercept = 1.4,        # Expected mean pain level (registry data)
+  sd = 1.88,              # Standard deviation of the outcome
+  mmoe = 1.1              # Acceptable multiplicative margin of error
+)
+```
+
+```{r}
+# Display the compact version
+tbl_final_compact <- create_baseline_table(df_transformed)
+tbl_final_compact
+
+# Display the compact version for only Pain
+tbl_final_pain <- create_baseline_table(
+  df_transformed %>% filter(!is.na(pain_1y))
+)
+tbl_final_pain
+```
+
+## Data Preparation for Modeling
+
+### Split Pain Dataset
+
+```{r split-datasets}
+# Split Pain Dataset
+pain_split <- filter_target_dataset(df_transformed, target_col = pain_1y)
+pain_dataset <- pain_split$included
+df_excluded_pain <- pain_split$excluded
+
+# Split Features and Labels
+pain_split_data <- split_data(pain_dataset, "pain_1y")
+pain_data <- pain_split_data$data
+pain_labels <- pain_split_data$labels
+```
+
+### Check whether excluded patients differ from included patients
+
+```{r compare-exclusions}
+
+# Summary Statistics for Included Patients
+summary_stats_included <- generate_summary_stats(df_transformed)
+summary_stats_excluded_pain <- generate_summary_stats(df_excluded_pain)
+
+# Combine the summary statistics into one comparison table
+comparison <- bind_rows(
+  Included = summary_stats_included,
+  Excluded_Pain = summary_stats_excluded_pain,
+  .id = "Group"
+)
+
+# Print the comparison table
+print(comparison)
+
+```
+
+### Comparison of Patients with and without Missing Outcome Data
+
+```{r missing-outcome-summary}
+# Generate missingness table from dataset that includes all eligible patients
+missing_tables <- create_missing_outcome_tables(df_transformed_missing)
+
+# Extract and display table comparing patients with and without 1-year pain outcome
+pain_missing_tbl <- missing_tables$pain
+pain_missing_tbl
+```
+
+### Shuffling and Splitting Data
+
+```{r shuffling-splitting}
+## Pain 
+# Set seed for reproducibility
+set.seed(199987)
+
+# Convert `fid` to a factor
+pain_dataset <- pain_dataset %>%
+  mutate(fid = as.factor(fid))
+
+# # How many unique patients are there?
+# nlevels(pain_dataset$fid)
+
+# Perform an 80-20 split by `fid`
+parts_pain <- partition(pain_dataset, p = 0.30, id_col = "fid", num_col = "pain_1y")
+
+# Separate into train and test splits
+test_split_pain <- parts_pain[[1]] %>% mutate(Set = "Test")
+train_split_pain <- parts_pain[[2]] %>% mutate(Set = "Train")
+```
+
+### Evaluate Train-Test Split
+
+```{r train-test-split}
+## Pain 
+# Combine train and test splits for evaluation
+dat_mod_eval_pain <- bind_rows(train_split_pain, test_split_pain)
+
+# Plot: Count observations in each set
+ggplot(dat_mod_eval_pain, aes(x = Set)) +
+  geom_bar() +
+  labs(
+    x = "Set",
+    y = "Count",
+    title = "Number of Observations per Set"
+  ) +
+  theme_fancy
+
+# Plot: Outcome distribution (pain_1y) by set
+ggplot(dat_mod_eval_pain, aes(x = pain_1y, fill = factor(Set))) +
+  geom_bar(position = "dodge") +
+  labs(
+    x = "1-year Pain",
+    y = "Density",
+    title = "Outcome Distribution by Set"
+  ) +
+  scale_fill_viridis(discrete = TRUE) +
+  theme_fancy
+```
+
+### Prepare Test and Training Sets
+
+```{r prepare-train-test}
+## Pain 
+# Remove "Set" column from splits
+train_xgb_pain <- train_split_pain %>%
+  select(-Set)
+test_xgb_pain <- test_split_pain %>%
+  select(-Set)
+
+# Extract labels
+train_labels_xgb_pain <- train_xgb_pain$pain_1y
+test_labels_xgb_pain <- test_xgb_pain$pain_1y
+
+# #Also saved for shiny app
+# saveRDS(train_xgb_pain, file = "shiny-prediction-tool/data/train_xgb_pain.rds")
+```
+
+```{r}
+# Separate flags for pain model tuning
+run_pain_tuning <- FALSE
+
+# Winner selection flag
+# Options: "Auto", "Baseline", "Bayesian", "Stepwise"
+winner_selection_pain <- "Bayesian"        # Set to "Auto" for automatic selection based on lowest MAE in  'best model'-choice
+```
+
+## Evaluation & Results
+
+### Tuning Method Comparison
+
+```{r comprehensive-three-way-evaluation}
+#| code-fold: true
+#| output: false
+
+# Load existing results OR run new evaluation
+results_file <- "data/comprehensive_three_way_evaluation_results.rds"
+
+if (file.exists(results_file) && !run_pain_tuning) {
+  cat("Loading existing three-way evaluation results...\n")
+  comprehensive_results <- readRDS(results_file)
+  
+} else {
+ if (run_pain_tuning) {
+    cat("Running comprehensive evaluation with retuning...\n")
+  } else {
+    cat("Results file doesn't exist. Running full evaluation...\n")
+  }
+  
+  # Run comprehensive evaluation with retuning and winner selection
+  comprehensive_results <- run_comprehensive_evaluation(
+    train_xgb_pain = train_xgb_pain,
+    test_xgb_pain = test_xgb_pain,
+    retune_pain = run_pain_tuning, 
+    save_plots = TRUE,
+    plot_dir = "output/",
+    winner_selection_pain = winner_selection_pain
+  )
+}
+
+# Always generate diagnostic plots regardless of the path above
+generate_all_diagnostic_plots(comprehensive_results,
+                             train_xgb_pain, test_xgb_pain)
+
+# Generate bootstrap calibration curves for all models
+generate_bootstrap_calibration_plots(comprehensive_results)
+
+# Extract key results with dynamic referencing
+winning_methods <- comprehensive_results$winners
+summary_stats <- comprehensive_results$summary_stats
+detailed_comparison <- comprehensive_results$comparison$detailed_summary
+
+# Get winning method names for dynamic access
+pain_winner <- winning_methods$pain$overall_winner %>% tolower()
+
+# Show how winners were selected
+cat("\nWinner Selection Summary:\n")
+cat("========================\n")
+cat(sprintf("Pain model winner: %s (selection method: %s)\n", 
+            tools::toTitleCase(pain_winner), 
+            winning_methods$pain$selection_method))
+
+# Extract winning models and results dynamically
+pain_winning_model <- comprehensive_results$comparison[[paste0("model_", pain_winner, "_pain")]]
+
+pain_winning_bootstrap <- comprehensive_results$comparison[[paste0("bootstrap_", pain_winner, "_pain")]]
+
+# Plot Distribution Comparisons Between Training and Testing Sets
+generate_and_save_distribution_plot(
+  model_type = "Pain",
+  train_df = train_xgb_pain,
+  test_df = test_xgb_pain,
+  top_vars = head(pain_winning_bootstrap$importance_summary$Feature, 5),
+  remove_titles = TRUE,
+  remove_grid = TRUE
+)
+
+# calibration curves:
+pain_calibration <- create_calibration_from_bootstrap(
+  bootstrap_result = pain_winning_bootstrap,
+  model_name = paste("Pain Model -", tools::toTitleCase(pain_winner)),
+  save_path = "output/pain_bootstrap_calibration.png",
+  smooth_method = "loess",
+  scale_type = "pain",
+  remove_grid = TRUE,
+  remove_titles = TRUE,
+  remove_caption = TRUE
+)
+
+
+pain_winning_eval <- comprehensive_results$comparison[[paste0("eval_", pain_winner, "_pain")]]
+
+# evaluation objects
+eval_best_tuned_pain <- list(
+  rmse = pain_winning_bootstrap$performance_summary$RMSE_mean,
+  mae = pain_winning_bootstrap$performance_summary$MAE_mean,
+  r_squared = NA
+)
+```
+
+### Comprehensive Method Comparison Results
+
+```{r}
+# Display comparison summary
+comprehensive_results$final_report <- generate_three_way_final_report(comprehensive_results)
+
+# Display the improved formatted report
+cat(comprehensive_results$final_report)
+
+# Show detailed performance metrics in a clean table
+detailed_summary <- comprehensive_results$comparison$detailed_summary
+selected_cols <- c(
+  "Outcome", "Method",
+  "RMSE_Bootstrap", "RMSE_SD",
+  "MAE_Bootstrap", "MAE_SD",
+  "Coverage"
+)
+detailed_summary <- detailed_summary[, selected_cols]
+
+knitr::kable(
+  detailed_summary,
+  caption = "Three-Way Hyperparameter Tuning Comparison",
+  digits = 3,
+  col.names = c(
+    "Outcome", "Method",
+    "RMSE (Bootstrap)", "RMSE SD",
+    "MAE (Bootstrap)", "MAE SD",
+    "Coverage (%)"
+  ),
+  align = c("l", "l", "r", "r", "r", "r", "r")
+)
+```
+
+### Pain
+
+#### Pain Model Performance Results
+
+```{r}
+# Display baseline results
+cat(sprintf("Winning Pain Model (%s) – Bootstrapped RMSE (mean ± SD): %.2f ± %.2f\n", 
+            tools::toTitleCase(pain_winner),
+            pain_winning_bootstrap$performance_summary$RMSE_mean, 
+            pain_winning_bootstrap$performance_summary$RMSE_sd))
+
+# And create comparison table showing all three methods:
+pain_table <- create_three_way_evaluation_table(comprehensive_results$comparison, outcome_type = "pain")
+print(pain_table)
+```
+
+##### Feature Importance
+
+```{r}
+# Print bootstrapped feature importance for the winning pain model
+print(pain_winning_bootstrap$importance_summary)
+# Plot feature importance based on bootstrap mean gains (Winning Pain Model)
+plot_importance_summary(pain_winning_bootstrap$importance_summary)
+
+ggsave("output/feature_importance_pain.png",
+       plot = plot_importance_summary(as.data.frame(pain_winning_bootstrap$importance_summary), title = NULL),
+       width = 6, height = 4, dpi = 300)
+```
+
+#### Evaluation Metrics / Side-by-side comparison
+
+```{r}
+
+# Compare baseline vs winning method
+create_model_eval_table_bootstrap(
+  baseline_results = comprehensive_results$comparison$bootstrap_baseline_pain$performance_summary,
+  tuned_results = pain_winning_bootstrap$performance_summary,
+  percentage_overlap_baseline = calculate_prediction_intervals(comprehensive_results$comparison$bootstrap_baseline_pain),
+  percentage_overlap_tuned = calculate_prediction_intervals(pain_winning_bootstrap),
+  model_name = "Pain"
+)
+
+create_tuned_model_eval_table_bootstrap(
+  tuned_results = pain_winning_bootstrap$performance_summary,
+  best_model_metrics = pain_winning_eval,  # Use the winning eval results
+  model_name = "Pain"
+)
+```
+
+### Table: Pain and Function
+
+```{r}
+create_tuned_model_eval_table_bootstrap(
+  tuned_results = pain_winning_bootstrap$performance_summary,
+  best_model_metrics = pain_winning_eval,
+  model_name = "Pain",
+  model_name_2 = "NULL"
+)
+```
+
+### Plots
+
+### Pain
+
+```{r}
+# Create the bootstrap data frame (combining predictions, prediction intervals, and a baseline variable) 
+# used for plots
+
+# Use median predictions from bootstrapped models
+predicted_pain <- pain_winning_bootstrap$predictions$Predicted
+observed_pain <- pain_winning_bootstrap$predictions$Actual
+residuals_pain <- observed_pain - predicted_pain
+
+# Define baseline variable for pain
+baseline_var_pain <- "painactivitiesnrs"
+
+bootstrap_df_pain <- create_bootstrap_df(
+  final_test_data = test_xgb_pain,
+  test_xgb_pain = test_xgb_pain,
+  reduced_results = list(predictions = predicted_pain),
+  bootstrap_results_reduced = pain_winning_bootstrap,
+  baseline_var = "painactivitiesnrs"
+)
+```
+
+#### Prediction plots
+
+```{r}
+# Plot predictions, intervals, and baseline values for pain
+p_pain <- plot_predictions_vs_baseline(bootstrap_df_pain)
+print(p_pain)
+
+# Create the plot for a selected patient (Pain)
+# With a gradient background (dashboard integration)
+p_pain_gradient <- plot_patient_prediction(bootstrap_df_pain, patient_identifier = "3048196", identifier_type = "id", scale_type = "pain")
+print(p_pain_gradient)
+
+p_pain_line <- plot_patient_prediction_line(
+  bootstrap_df_pain,
+  pain_winning_bootstrap$bootstrap_results,
+  "3140680",
+  identifier_type = "id"
+)
+p_pain_line <- p_pain_line +
+  labs(title = NULL, subtitle = NULL, y = NULL)
+print(p_pain_line)
+
+ggsave("output/patient_prediction_pain_line.png",
+       plot = p_pain_line, width = 6, height = 4, dpi = 300)
+
+p_pain_line_high <- plot_patient_prediction_line(
+  bootstrap_df_pain,
+  pain_winning_bootstrap$bootstrap_results,
+  "4075009",
+  identifier_type = "id"
+)
+p_pain_line_high <- p_pain_line_high +
+  labs(title = NULL, subtitle = NULL)
+
+print(p_pain_line_high)
+ ggsave("output/patient_prediction_pain_line_high.png",
+       plot = p_pain_line_high, width = 6, height = 4, dpi = 300)
+
+# preds <- pain_winning_bootstrap$predictions
+# preds$covered <- preds$Actual >= preds$lb & preds$Actual <= preds$ub
+# covered_preds <- subset(preds, covered)
+# 
+# covered_preds$width <- covered_preds$ub - covered_preds$lb
+# 
+# lowest_width_patient  <- covered_preds[which.min(covered_preds$width), ]
+# highest_width_patient <- covered_preds[which.max(covered_preds$width), ]
+
+```
+
+```{r model-interpretation}
+# Generate complete interpretation report with saved visualizations
+full_interpretation <- generate_model_interpretation(
+  comprehensive_results,
+  train_xgb_pain,
+  save_plots = TRUE,
+  output_dir = "output/"
+)
+```
+
+#### SHAP Values: Pain
+
+```{r}
+
+if (!is.null(comprehensive_results$shap_analysis$pain)) {
+  methods <- names(comprehensive_results$shap_analysis$pain)
+  
+  for (method in methods) {
+    if (!is.null(comprehensive_results$shap_analysis$pain[[method]])) {
+      cat(sprintf("\n### SHAP Analysis - %s Method (Pain)\n", tools::toTitleCase(method)))
+      
+      # Display SHAP plots
+      shap_results <- comprehensive_results$shap_analysis$pain[[method]]
+      if (!is.null(shap_results$shapley)) {
+        shap_results$shapley$plot()
+      }
+      if (!is.null(shap_results$shap_long)) {
+        shap.plot.summary(shap_results$shap_long)
+      }
+    }
+  }
+}
+```
+
+```{r manuscript-panels}
+
+# Assemble manuscript-ready multi-panel figures
+create_manuscript_panel_plots(comprehensive_results)
+```
+
+## Post-hoc analyses
+
+```{r}
+#Post-hoc analysis: % of patients having absolute prediction errors smaller than the MIC
+
+# # Load the comprehensive results object (created by run_comprehensive_evaluation)
+# comprehensive_results <- readRDS("data/comprehensive_three_way_evaluation_results.rds")
+# 
+# # Determine the winning pain method and access its predictions
+# pain_winner <- comprehensive_results$winners$pain$overall_winner     # e.g. "Bayesian"
+# bootstrap_key <- paste0("bootstrap_", tolower(pain_winner), "_pain")
+# pred_data <- comprehensive_results$comparison[[bootstrap_key]]$predictions
+# 
+# # MIC threshold for pain
+# mic <- 3.9
+# 
+# # Calculate proportions of absolute errors
+# abs_err <- abs(pred_data$Actual - pred_data$Predicted)
+# prop_ge_mic <- mean(abs_err >= mic)       # fraction with error ≥ MIC
+# prop_lt_mic <- mean(abs_err < mic)        # fraction with error < MIC
+# 
+# prop_ge_mic   # proportion ≥ 3.9
+# prop_lt_mic   # proportion < 3.9
+
+# Outcome vs Predicted: #Number of patients with absolute error > 4 
+# pred_data$diff <- pred_data$Actual - pred_data$Predicted
+# count(pred_data[pred_data$diff > 4 | pred_data$diff < -4 ,])
+# count(pred_data[pred_data$diff > 4 | pred_data$diff < -4 ,]) / count(pred_data) *100 
+
+# # Find range of values for prediction intervals
+# res <- readRDS('data/comprehensive_three_way_evaluation_results.rds')
+# preds <- res$comparison$bootstrap_bayesian_pain$predictions
+# widths <- preds$ub - preds$lb
+# print(range(widths))
+
+# Actual outcomes above prediction range: 
+# # Nr of patient
+# count(pred_data[pred_data$Actual > max(widths),])
+# # In percent
+# count(pred_data[pred_data$Actual > max(widths),]) / count(pred_data) *100
+
+# # To see how large and small the SHAP contributions get
+# # Load the SHAP analysis results
+# shap_results <- readRDS("data/shap_analysis_results.rds")
+# 
+# # Get min/max SHAP values for each pain model
+# for (method in names(shap_results$pain)) {
+#   shap_matrix <- shap_results$pain[[method]]$shap_values$shap_score
+#   rng <- range(shap_matrix, na.rm = TRUE)
+#   cat(sprintf("%s pain model -> Lowest: %.3f, Highest: %.3f\n",
+#               method, rng[1], rng[2]))
+# }
+
+# # Look at patients who should have had a 0
+# pred0 <- pred_data %>% filter(Actual == 0)
+# 
+# # Summary stats (NA-safe + tidy percentages)
+# summ_pred0 <- pred0 %>%
+#   summarize(
+#     n         = n(),
+#     min       = min(Predicted, na.rm = TRUE),
+#     q1        = quantile(Predicted, 0.25, na.rm = TRUE),
+#     median    = median(Predicted, na.rm = TRUE),
+#     mean      = mean(Predicted, na.rm = TRUE),
+#     q3        = quantile(Predicted, 0.75, na.rm = TRUE),
+#     max       = max(Predicted, na.rm = TRUE),
+#     pct_lt_0_5   = mean(Predicted < 0.5,  na.rm = TRUE),
+#     pct_0_5_1_5  = mean(Predicted >= 0.5 & Predicted < 1.5, na.rm = TRUE),
+#     pct_ge_4     = mean(Predicted >= 4,   na.rm = TRUE),
+#     pct_eq_0     = mean(Predicted == 0,   na.rm = TRUE)
+#   ) %>%
+#   mutate(across(starts_with("pct_"), ~ percent(.x, accuracy = 0.1)))
+# 
+# summ_pred0
+# 
+# ggplot(pred0, aes(Predicted)) +
+#   geom_histogram(binwidth = 0.5, boundary = 0, closed = "left") +
+#   geom_vline(xintercept = c(0.5, 1.5), linetype = "dashed", linewidth = 0.3) +
+#   labs(
+#     x = "Predicted pain (for Actual = 0)",
+#     y = "Count",
+#     title = "Predictions for patients with observed pain = 0"
+#   ) +
+#   coord_cartesian(xlim = c(0, 6))  # adjust if you want the full 0–10 range
+
+# Patients with predictions over 5.9
+# pred_data[pred_data$Actual > 5.9,]
+# 
+# count(pred_data[pred_data$Actual > 5.9,])
+# #   n
+# # 1 6
+# count(pred_data)
+# #     n
+# # 1 119
+# # > 6/119*100
+```
