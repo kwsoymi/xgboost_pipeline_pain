@@ -1,6 +1,6 @@
 # XGBoost ML Pipeline: Pain Model
 
-This repository contains the code used to develop the machine learning pipeline and apply it to predicting postoperative pain as described in the manuscript *"Development and Interval Validation of a Transparent, Uncertainty-Aware XGBoost Machine Learning Pipeline: A Case Study in Pain Prediction After Thumb Arthroplasty."*
+This repository contains the code used to implement a XGBoost machine learning pipeline to predicting postoperative pain as described in the manuscript *"A Transparent, Uncertainty-Aware XGBoost Pipeline for Clinical Outcome Prediction: Case Study in Pain After Thumb Arthroplasty."*
 
 The workflow is implemented with **R** and **Quarto**. `xgboost_pipeline.qmd` orchestrates the complete pipeline:
 
