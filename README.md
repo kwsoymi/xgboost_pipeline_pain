@@ -2,7 +2,7 @@
 
 This repository contains the code used to implement a XGBoost machine learning pipeline to predicting postoperative pain as described in the manuscript *"A Transparent, Uncertainty-Aware XGBoost Pipeline for Clinical Outcome Prediction: Case Study in Pain After Thumb Arthroplasty."*
 
-The workflow is implemented with **R** and **Quarto**. `xgboost_pipeline.qmd` orchestrates the complete pipeline:
+The workflow is implemented with **R**; the **Quarto** notebook `xgboost_pipeline_pain.qmd` simply orchestrates the complete pipeline for documentation and reproducibility. All steps are standard R scripts that can be run without Quarto:
 
 1.  load and clean registry-derived data
 2.  apply inclusion/exclusion criteria and feature engineering
