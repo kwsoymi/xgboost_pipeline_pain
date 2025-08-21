@@ -18,7 +18,7 @@ The workflow is implemented with **R**; the **Quarto** notebook `xgboost_pipelin
 ## Prerequisites
 
 -   R \>= 4.3
--   [Quarto](https://quarto.org/docs/get-started/) or [RStudio](https://posit.co/download/rstudio/)
+-   Optional: [Quarto](https://quarto.org/docs/get-started/) or [RStudio](https://posit.co/download/rstudio/) for rendering the notebook. The pipeline scripts can be sourced in any R environment.
 
 ## Project structure
 
@@ -57,6 +57,7 @@ renv::restore()
 
 ## Running the analysis
 
+### Using Quarto
 Render the notebook in RStudio or from the command line:
 
 ``` bash
@@ -64,6 +65,19 @@ quarto render xgboost_pipeline.qmd -P run_pain_tuning=false
 ```
 
 Set `run_pain_tuning=true` to enable hyperparameter tuning. Outputs are written to the `data/` and `output/` directories.
+
+### Using base R
+
+All components are regular R scripts. To run the workflow without Quarto, open an R session and source the scripts directly, for example:
+
+``` r
+source("pipeline/load_data.R")
+source("pipeline/inclusion_exclusion.R")
+source("pipeline/data_preprocessing.R")
+source("models/comprehensive_evaluation.R")
+```
+
+This produces the same models and predictions as the Quarto notebook.
 
 ## Citation
 
